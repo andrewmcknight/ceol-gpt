@@ -1,0 +1,29 @@
+# ceol-gpt default config — alias for large.yaml (~47M params, A100/H100)
+# For smaller GPUs use small.yaml (T4) or medium.yaml (L4).
+
+data_path: data/tunes.json
+train_split: 0.85
+val_split: 0.10
+test_split: 0.05
+max_seq_len: 512
+
+model:
+  d_model: 512
+  n_heads: 8
+  n_layers: 12
+  d_ff: 2048
+  dropout: 0.1
+
+training:
+  batch_size: 64
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  max_epochs: 100
+  warmup_steps: 1000
+  grad_clip: 1.0
+  patience: 10
+
+generation:
+  temperature: 0.8
+  top_k: 50
+  top_p: 0.95
