@@ -47,7 +47,7 @@ Word-based regex tokenizer. Each musical "word" is one token:
 - Decorations: `~`, `.`, ties `-`
 - Tuplets: `(3`
 - Broken rhythm operators: `>`, `<`
-- Special conditioning tokens: `<TYPE:reel>`, `<KEY:Gmajor>`, `<BOS>`, `<EOS>`, `<PAD>`
+- Special conditioning tokens: `<TYPE:reel>`, `<KEY:Gmajor>`, `<METER:4/4>`, `<BOS>`, `<EOS>`, `<PAD>`
 
 ## Training
 

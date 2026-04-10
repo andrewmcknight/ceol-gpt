@@ -104,6 +104,10 @@ def _key_token(key: str) -> str:
     return f"<KEY:{key}>"
 
 
+def _meter_token(meter: str) -> str:
+    return f"<METER:{meter}>"
+
+
 # ---------------------------------------------------------------------------
 # Tokenize a single ABC music string → list[str]
 # ---------------------------------------------------------------------------
@@ -211,6 +215,7 @@ def build_vocab(
     # Collect conditioning token strings
     type_tokens = {_type_token(t["type"]) for t in tunes}
     key_tokens = {_key_token(t["mode"]) for t in tunes}
+    meter_tokens = {_meter_token(t["meter"]) for t in tunes}
 
     # Tokenize all ABC bodies
     for tune in tunes:
@@ -221,6 +226,7 @@ def build_vocab(
     vocab_tokens = list(_SPECIAL_TOKENS)
     vocab_tokens.extend(sorted(type_tokens))
     vocab_tokens.extend(sorted(key_tokens))
+    vocab_tokens.extend(sorted(meter_tokens))
     # Music tokens filtered by min_freq, sorted for determinism
     music_tokens = sorted(tok for tok, cnt in counter.items() if cnt >= min_freq)
     vocab_tokens.extend(music_tokens)
@@ -286,15 +292,16 @@ class ABCTokenizer:
         abc: str,
         tune_type: str,
         key: str,
+        meter: str,
         add_bos: bool = True,
         add_eos: bool = True,
     ) -> list[int]:
         """Encode one tune to a list of token IDs.
 
         Output format:
-            <TYPE:reel> <KEY:Gmajor> <BOS> tok tok tok ... <EOS>
+            <TYPE:reel> <KEY:Gmajor> <METER:4/4> <BOS> tok tok tok ... <EOS>
         """
-        prefix = [_type_token(tune_type), _key_token(key)]
+        prefix = [_type_token(tune_type), _key_token(key), _meter_token(meter)]
         if add_bos:
             prefix.append(BOS_TOKEN)
         music_tokens = tokenize_abc(abc)
@@ -313,6 +320,7 @@ class ABCTokenizer:
             if t not in _SPECIAL_TOKENS
             and not t.startswith("<TYPE:")
             and not t.startswith("<KEY:")
+            and not t.startswith("<METER:")
             and t != UNK_TOKEN
         ]
         return " ".join(music)

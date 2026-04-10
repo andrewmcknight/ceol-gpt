@@ -2,7 +2,7 @@
 PyTorch Dataset and DataLoader utilities for ceol-gpt.
 
 Each example is a single tune encoded as:
-    <TYPE:reel> <KEY:Gmajor> <BOS> tok tok ... <EOS>
+    <TYPE:reel> <KEY:Gmajor> <METER:4/4> <BOS> tok tok ... <EOS>
 
 Long tunes are truncated to max_seq_len. Short tunes are left as-is
 (collation handles padding per batch).
@@ -48,7 +48,7 @@ class TuneDataset(Dataset):
         self._samples: list[torch.Tensor] = []
 
         for tune in tunes:
-            ids = tokenizer.encode(tune["abc"], tune["type"], tune["mode"])
+            ids = tokenizer.encode(tune["abc"], tune["type"], tune["mode"], tune["meter"])
             # Truncate to max_seq_len
             if len(ids) > max_seq_len:
                 ids = ids[:max_seq_len]
