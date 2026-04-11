@@ -39,39 +39,73 @@ from src.tokenizer import ABCTokenizer, tokenize_abc
 
 
 # ---------------------------------------------------------------------------
-# Core metric: longest contiguous matching n-gram
+# N-gram index: build once, query many times
 # ---------------------------------------------------------------------------
 
-def longest_common_substring_len(a: list, b: list) -> int:
-    """Return the length of the longest contiguous subsequence shared by a and b.
+class NGramIndex:
+    """Precomputed set of all k-grams from a corpus, for fast longest-match queries.
 
-    Uses a rolling-hash / DP approach that is O(len(a) * len(b)) but fast
-    enough for tune-length sequences (~100-400 tokens each).
+    Building the index is O(N * avg_len).
+    Querying for the longest match length is O(log(max_len) * gen_len).
+    Both are vastly faster than the naive O(n*m) pairwise DP.
     """
-    if not a or not b:
-        return 0
 
-    # DP: dp[j] = length of longest common suffix of a[:i] and b[:j]
-    prev = [0] * (len(b) + 1)
-    best = 0
-    for i in range(1, len(a) + 1):
-        curr = [0] * (len(b) + 1)
-        for j in range(1, len(b) + 1):
-            if a[i - 1] == b[j - 1]:
-                curr[j] = prev[j - 1] + 1
-                if curr[j] > best:
-                    best = curr[j]
-        prev = curr
-    return best
+    def __init__(self, seqs: list[list[str]]):
+        # exact match: map each full sequence (as tuple) → its index
+        self._exact: dict[tuple, int] = {}
+        # kgram sets keyed by length, built lazily as needed
+        self._kgram_cache: dict[int, set[tuple]] = {}
+        self._seqs = seqs
+
+        for idx, seq in enumerate(seqs):
+            key = tuple(seq)
+            if key not in self._exact:
+                self._exact[key] = idx
+
+    def _kgrams_of_length(self, k: int) -> set[tuple]:
+        if k not in self._kgram_cache:
+            s: set[tuple] = set()
+            for seq in self._seqs:
+                if len(seq) >= k:
+                    for i in range(len(seq) - k + 1):
+                        s.add(tuple(seq[i:i + k]))
+            self._kgram_cache[k] = s
+        return self._kgram_cache[k]
+
+    def exact_match_index(self, seq: list[str]) -> int:
+        """Return training index of exact match, or -1."""
+        return self._exact.get(tuple(seq), -1)
+
+    def longest_match_len(self, gen: list[str]) -> int:
+        """Binary search for the longest k such that some k-gram of gen appears
+        in the training corpus. Returns that length (0 if no match at all)."""
+        if not gen:
+            return 0
+
+        lo, hi = 1, len(gen)
+        result = 0
+
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            kgrams = self._kgrams_of_length(mid)
+            found = any(tuple(gen[i:i + mid]) in kgrams for i in range(len(gen) - mid + 1))
+            if found:
+                result = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+        return result
 
 
 # ---------------------------------------------------------------------------
-# Build an index of training token sequences for fast lookup
+# Build index from training tunes
 # ---------------------------------------------------------------------------
 
-def build_train_index(tunes: list[dict]) -> list[list[str]]:
-    """Tokenize all training tunes and return as a list of token lists."""
-    return [tokenize_abc(t["abc"]) for t in tunes]
+def build_train_index(tunes: list[dict]) -> NGramIndex:
+    """Tokenize all training tunes and build an NGramIndex."""
+    seqs = [tokenize_abc(t["abc"]) for t in tunes]
+    return NGramIndex(seqs)
 
 
 # ---------------------------------------------------------------------------
@@ -80,15 +114,15 @@ def build_train_index(tunes: list[dict]) -> list[list[str]]:
 
 def analyze_one(
     generated_tokens: list[str],
-    train_token_seqs: list[list[str]],
+    index: NGramIndex,
 ) -> dict:
-    """Compute novelty metrics for one generated tune against all training tunes.
+    """Compute novelty metrics for one generated tune.
 
     Returns a dict with:
       - exact_match (bool)
       - longest_match_tokens (int)
       - longest_match_frac (float)  — fraction of generated tune length
-      - closest_train_idx (int)     — index of the most similar training tune
+      - closest_train_idx (int)     — index of exact match (-1 if none)
     """
     if not generated_tokens:
         return {
@@ -98,27 +132,20 @@ def analyze_one(
             "closest_train_idx": -1,
         }
 
+    exact_idx = index.exact_match_index(generated_tokens)
+    exact = exact_idx >= 0
+
+    if exact:
+        best_len = len(generated_tokens)
+    else:
+        best_len = index.longest_match_len(generated_tokens)
+
     gen_len = len(generated_tokens)
-    best_len = 0
-    best_idx = -1
-    exact = False
-
-    for idx, train_tokens in enumerate(train_token_seqs):
-        if train_tokens == generated_tokens:
-            exact = True
-            best_len = gen_len
-            best_idx = idx
-            break  # can't do better than exact
-        lcs = longest_common_substring_len(generated_tokens, train_tokens)
-        if lcs > best_len:
-            best_len = lcs
-            best_idx = idx
-
     return {
         "exact_match": exact,
         "longest_match_tokens": best_len,
         "longest_match_frac": best_len / gen_len if gen_len else 0.0,
-        "closest_train_idx": best_idx,
+        "closest_train_idx": exact_idx,
     }
 
 
@@ -138,7 +165,7 @@ def memorization_report(
     ----------
     generated_abc_list : sequence of raw ABC music strings (no conditioning tokens)
     train_tunes        : list of tune dicts from tunes.json
-    tokenizer          : optional, used only for its tokenize_abc — can pass None
+    tokenizer          : optional, unused — kept for API compatibility
     verbose            : print a summary table
 
     Returns
@@ -146,12 +173,13 @@ def memorization_report(
     List of per-tune result dicts (same fields as analyze_one, plus 'generated_tokens').
     """
     print(f"Indexing {len(train_tunes):,} training tunes...")
-    train_seqs = build_train_index(train_tunes)
+    index = build_train_index(train_tunes)
+    print("Index built.")
 
     results = []
     for i, abc in enumerate(generated_abc_list):
         gen_tokens = tokenize_abc(abc)
-        result = analyze_one(gen_tokens, train_seqs)
+        result = analyze_one(gen_tokens, index)
         result["tune_index"] = i
         result["generated_tokens"] = gen_tokens
         results.append(result)
@@ -216,24 +244,16 @@ def main():
         "--split", default="---",
         help="Separator between tunes in --generated file (default: '---')"
     )
-    parser.add_argument(
-        "--train-split", default="train",
-        choices=["train", "all"],
-        help="Check against 'train' split only or 'all' tunes (default: train)"
-    )
     args = parser.parse_args()
 
-    # Load training data
     print(f"Loading {args.data}...")
     with open(args.data) as f:
         tunes = json.load(f)
 
-    # Load tokenizer (optional — only needed if you want to reuse it elsewhere)
     tokenizer = None
     if args.tokenizer:
         tokenizer = ABCTokenizer.load(args.tokenizer)
 
-    # Load generated tunes
     raw = Path(args.generated).read_text()
     if args.split in raw:
         generated = [block.strip() for block in raw.split(args.split) if block.strip()]
@@ -241,7 +261,6 @@ def main():
         generated = [line.strip() for line in raw.splitlines() if line.strip()]
 
     print(f"Loaded {len(generated)} generated tunes.")
-
     memorization_report(generated, tunes, tokenizer=tokenizer, verbose=True)
 
 
