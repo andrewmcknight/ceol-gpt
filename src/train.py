@@ -31,9 +31,23 @@ from tqdm import tqdm
 
 from src.dataset import make_dataloaders, stratified_split
 from src.model import CeolGPT, ModelConfig, build_model
-from src.tokenizer import ABCTokenizer
+from src.tokenizer import ABCTokenizer, GRACE_START_TOKEN, CHORD_START_TOKEN
 
 import json as _json
+
+
+# ---------------------------------------------------------------------------
+# Tokenizer staleness check
+# ---------------------------------------------------------------------------
+
+def _tokenizer_is_current(tokenizer: ABCTokenizer) -> bool:
+    """Return True if the tokenizer was built with the current tokenizer.py.
+
+    Detects tokenizers built before GRACE_START / CHORD_START were added to
+    _SPECIAL_TOKENS (vocab sizes 932 or 939 from earlier training runs).
+    """
+    vocab = tokenizer.vocab.token_to_id
+    return GRACE_START_TOKEN in vocab and CHORD_START_TOKEN in vocab
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +135,7 @@ def save_checkpoint(path: Path, model: CeolGPT, optimiser, epoch: int, val_loss:
     torch.save({
         "epoch": epoch,
         "val_loss": val_loss,
+        "vocab_size": model.cfg.vocab_size,   # saved explicitly so resume can validate
         "model_state": model.state_dict(),
         "optimiser_state": optimiser.state_dict(),
         "model_config": cfg,
@@ -128,7 +143,22 @@ def save_checkpoint(path: Path, model: CeolGPT, optimiser, epoch: int, val_loss:
 
 
 def load_checkpoint(path: Path, model: CeolGPT, optimiser=None):
-    ckpt = torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+
+    # Determine the vocab_size the checkpoint was trained with.
+    # New checkpoints store it explicitly; fall back to the embedding weight shape
+    # for checkpoints saved before this field was added.
+    ckpt_vocab_size = ckpt.get("vocab_size") or ckpt["model_state"]["tok_emb.weight"].shape[0]
+
+    if ckpt_vocab_size != model.cfg.vocab_size:
+        raise ValueError(
+            f"vocab_size mismatch: checkpoint={ckpt_vocab_size}, "
+            f"current tokenizer={model.cfg.vocab_size}. "
+            "The tokenizer was rebuilt since this checkpoint was saved. "
+            "Either delete the checkpoint and run without --resume, "
+            "or restore the matching tokenizer.pkl."
+        )
+
     model.load_state_dict(ckpt["model_state"])
     if optimiser is not None and "optimiser_state" in ckpt:
         optimiser.load_state_dict(ckpt["optimiser_state"])
@@ -163,14 +193,25 @@ def train(cfg: dict, run_name: str, resume: bool):
     print(f"AMP dtype: {amp_dtype}")
 
     # --- Tokenizer ---
+    # Always load the full tunes list here; it's also needed to rebuild if stale.
+    print(f"Loading data from {cfg['data_path']}...")
+    with open(cfg["data_path"]) as f:
+        tunes = _json.load(f)
+
     if tok_path.exists():
-        print(f"Loading tokenizer from {tok_path}")
         tokenizer = ABCTokenizer.load(tok_path)
+        if not _tokenizer_is_current(tokenizer):
+            print(
+                f"  ⚠  Tokenizer at {tok_path} is stale "
+                f"(vocab={len(tokenizer):,}, missing GRACE/CHORD tokens). Rebuilding …"
+            )
+            tokenizer = ABCTokenizer.from_tunes(tunes, min_freq=2)
+            tokenizer.save(tok_path)
+            print(f"  ✓  Tokenizer rebuilt: {len(tokenizer):,} tokens")
+        else:
+            print(f"Loading tokenizer from {tok_path}")
     else:
-        import json as _json
         print(f"Building tokenizer from {cfg['data_path']}...")
-        with open(cfg["data_path"]) as f:
-            tunes = _json.load(f)
         tokenizer = ABCTokenizer.from_tunes(tunes, min_freq=2)
         tokenizer.save(tok_path)
     print(f"Vocab size: {len(tokenizer):,}")
@@ -185,6 +226,7 @@ def train(cfg: dict, run_name: str, resume: bool):
         train_frac=cfg["train_split"],
         val_frac=cfg["val_split"],
         num_workers=int(os.environ.get("NUM_WORKERS", 2)),
+        tunes=tunes,   # already loaded during tokenizer step — skip second file read
     )
     print(f"Batches — train: {len(train_dl):,}  val: {len(val_dl):,}  test: {len(test_dl):,}")
 
@@ -214,10 +256,14 @@ def train(cfg: dict, run_name: str, resume: bool):
     step = 0
 
     if resume and latest_ckpt.exists():
-        start_epoch, best_val_loss = load_checkpoint(latest_ckpt, model, optimiser)
-        start_epoch += 1
-        step = start_epoch * steps_per_epoch
-        print(f"Resumed from epoch {start_epoch}, best val loss {best_val_loss:.4f}")
+        try:
+            start_epoch, best_val_loss = load_checkpoint(latest_ckpt, model, optimiser)
+            start_epoch += 1
+            step = start_epoch * steps_per_epoch
+            print(f"Resumed from epoch {start_epoch}, best val loss {best_val_loss:.4f}")
+        except ValueError as exc:
+            print(f"\n  ⚠  Cannot resume: {exc}")
+            print("  Starting fresh training with the current tokenizer.\n")
 
     # --- Training loop ---
     log_entries = []

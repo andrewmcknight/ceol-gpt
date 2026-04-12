@@ -63,14 +63,33 @@ def load_model(
 
     Returns:
         (model, tokenizer) — model is in eval mode.
+
+    Raises:
+        ValueError: if the tokenizer's vocab_size doesn't match the checkpoint.
     """
     device = torch.device(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     tokenizer = ABCTokenizer.load(tokenizer_path)
 
+    # Infer the vocab_size the checkpoint was trained with.
+    # New checkpoints store it explicitly; older ones don't, so fall back to the
+    # embedding weight shape.
+    ckpt_vocab_size = (
+        ckpt.get("vocab_size")
+        or ckpt["model_state"]["tok_emb.weight"].shape[0]
+    )
+
+    if ckpt_vocab_size != len(tokenizer):
+        raise ValueError(
+            f"Tokenizer/checkpoint vocab_size mismatch: "
+            f"tokenizer has {len(tokenizer):,} tokens but checkpoint was trained with "
+            f"{ckpt_vocab_size:,}. Make sure you're using the matching tokenizer.pkl "
+            f"for this checkpoint (usually in the same models/<run>/ directory)."
+        )
+
     cfg = ckpt["model_config"]
-    model = build_model(cfg, vocab_size=len(tokenizer)).to(device)
+    model = build_model(cfg, vocab_size=ckpt_vocab_size).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 

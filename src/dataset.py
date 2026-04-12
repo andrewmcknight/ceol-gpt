@@ -47,12 +47,39 @@ class TuneDataset(Dataset):
         self.max_seq_len = max_seq_len
         self._samples: list[torch.Tensor] = []
 
+        skipped = 0
+        vocab_size = len(tokenizer)
         for tune in tunes:
-            ids = tokenizer.encode(tune["abc"], tune["type"], tune["mode"], tune["meter"])
+            try:
+                ids = tokenizer.encode(
+                    tune["abc"],
+                    tune["type"],
+                    tune.get("mode", tune.get("key", "")),
+                    tune.get("meter", "4/4"),
+                )
+            except Exception:
+                skipped += 1
+                continue
+
             # Truncate to max_seq_len
             if len(ids) > max_seq_len:
                 ids = ids[:max_seq_len]
+
+            # Guard: every ID must be a valid embedding index.
+            # Out-of-range IDs would cause a silent CUDA error or a cryptic
+            # "index out of bounds" on CPU.  Clamp to UNK rather than crash.
+            unk_id = tokenizer.vocab.unk_id
+            ids = [i if i < vocab_size else unk_id for i in ids]
+
+            if len(ids) < 2:          # need at least one input + one target
+                skipped += 1
+                continue
+
             self._samples.append(torch.tensor(ids, dtype=torch.long))
+
+        if skipped:
+            import warnings
+            warnings.warn(f"TuneDataset: skipped {skipped} tunes (encode error or too short)")
 
     def __len__(self) -> int:
         return len(self._samples)
@@ -133,10 +160,16 @@ def make_dataloaders(
     val_frac: float = 0.10,
     num_workers: int = 0,
     seed: int = 42,
+    tunes: list[dict] | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
-    """Load tunes.json, split, build Datasets, return (train, val, test) DataLoaders."""
-    with open(data_path) as f:
-        tunes = json.load(f)
+    """Load tunes.json, split, build Datasets, return (train, val, test) DataLoaders.
+
+    Pass ``tunes`` directly to skip re-reading the file (e.g. when it was already
+    loaded during tokenizer construction).
+    """
+    if tunes is None:
+        with open(data_path) as f:
+            tunes = json.load(f)
 
     train_tunes, val_tunes, test_tunes = stratified_split(
         tunes, train_frac=train_frac, val_frac=val_frac, seed=seed
