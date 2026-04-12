@@ -76,12 +76,30 @@ _FIRST_NOTE_RE = re.compile(
     r"(?:\^\^|\^|__|_|=)?[A-Ga-gzxZ][,']*(?:\d+\/\d+|\d+\/|\/\d+|\/+|\d+)?"
 )
 
+# Matches all notes inside a grace note group (grace notes rarely have durations,
+# but the pattern is permissive to handle any that do)
+_GRACE_NOTE_RE = re.compile(
+    r"(?:\^\^|\^|__|_|=)?[A-Ga-g][,']*(?:\d+\/\d+|\d+\/|\/\d+|\/+|\d+)?"
+)
+
 
 def _first_note_from_chord(chord: str) -> str | None:
     """Extract the first note from an inline chord string like '[G2D2B2]' → 'G2'."""
     inner = chord[1:-1]  # strip [ and ]
     m = _FIRST_NOTE_RE.match(inner)
     return m.group() if m else None
+
+
+def _tokenize_grace(grace: str) -> list[str]:
+    """Expand a grace note group like '{GBd}' into individual note tokens."""
+    inner = grace[1:-1]  # strip { and }
+    return _GRACE_NOTE_RE.findall(inner)
+
+
+def _tokenize_chord(chord: str) -> list[str]:
+    """Expand an inline chord like '[G2D2B2]' into individual note tokens."""
+    inner = chord[1:-1]  # strip [ and ]
+    return _GRACE_NOTE_RE.findall(inner)
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +110,18 @@ PAD_TOKEN = "<PAD>"
 BOS_TOKEN = "<BOS>"
 EOS_TOKEN = "<EOS>"
 UNK_TOKEN = "<UNK>"
+GRACE_START_TOKEN = "<GRACE_START>"
+GRACE_END_TOKEN = "<GRACE_END>"
+CHORD_START_TOKEN = "<CHORD_START>"
+CHORD_END_TOKEN = "<CHORD_END>"
 
-_SPECIAL_TOKENS = [PAD_TOKEN, BOS_TOKEN, EOS_TOKEN, UNK_TOKEN]
+# All tokens that get reserved IDs at the front of the vocab
+_SPECIAL_TOKENS = [PAD_TOKEN, BOS_TOKEN, EOS_TOKEN, UNK_TOKEN,
+                   GRACE_START_TOKEN, GRACE_END_TOKEN,
+                   CHORD_START_TOKEN, CHORD_END_TOKEN]
+
+# Tokens that are stripped from ABC output during decode (conditioning + padding)
+_CONTROL_TOKENS = {PAD_TOKEN, BOS_TOKEN, EOS_TOKEN, UNK_TOKEN}
 
 
 def _type_token(tune_type: str) -> str:
@@ -119,9 +147,9 @@ _DISCARD = {"(", ")"}
 def tokenize_abc(abc: str) -> list[str]:
     """Tokenize one ABC music body string into a list of string tokens.
 
-    Grace notes, chord symbols, bang decorations, comments, slur markers,
-    whitespace, and line-continuation backslashes are silently discarded.
-    Everything else becomes a token.
+    Grace notes are expanded: {GBd} → <GRACE_START> G B d <GRACE_END>.
+    Chord symbols are kept as atomic tokens: "Am7" → "Am7".
+    Bang decorations, comments, slur markers, whitespace discarded.
     """
     tokens = []
     for m in _TOKEN_RE.finditer(abc):
@@ -130,14 +158,28 @@ def tokenize_abc(abc: str) -> list[str]:
             continue
         first = tok[0]
 
-        # Discard stripped categories (grace notes, chord symbols, bang decorations, comments)
-        if first in ('{', '"', '!', '%'):
+        # Grace notes: expand into framing tokens + individual notes
+        if first == '{':
+            inner = _tokenize_grace(tok)
+            if inner:
+                tokens.append(GRACE_START_TOKEN)
+                tokens.extend(inner)
+                tokens.append(GRACE_END_TOKEN)
             continue
-        # Inline chords ([CEG], [G2D2B2]) — keep only the first note
+        # Chord symbols: keep as atomic token
+        if first == '"':
+            tokens.append(tok)
+            continue
+        # Discard bang decorations and comments
+        if first in ('!', '%'):
+            continue
+        # Inline chords ([CEG], [G2D2B2]) — expand with framing tokens
         if first == '[' and len(tok) > 1 and not tok[1].isdigit():
-            note = _first_note_from_chord(tok)
-            if note:
-                tokens.append(note)
+            notes = _tokenize_chord(tok)
+            if notes:
+                tokens.append(CHORD_START_TOKEN)
+                tokens.extend(notes)
+                tokens.append(CHORD_END_TOKEN)
             continue
         # Discard slur markers
         if tok in _DISCARD:
@@ -313,17 +355,40 @@ class ABCTokenizer:
         return self.vocab.decode(ids)
 
     def decode_to_abc(self, ids: list[int]) -> str:
-        """Decode IDs back to an ABC music string, stripping special tokens."""
+        """Decode IDs back to an ABC music string, stripping control/conditioning tokens
+        and reconstructing grace note groups as {notes}."""
         tokens = self.vocab.decode(ids)
         music = [
             t for t in tokens
-            if t not in _SPECIAL_TOKENS
+            if t not in _CONTROL_TOKENS
             and not t.startswith("<TYPE:")
             and not t.startswith("<KEY:")
             and not t.startswith("<METER:")
-            and t != UNK_TOKEN
         ]
-        return " ".join(music)
+        # Reconstruct grace note and inline chord groups from framing tokens
+        result = []
+        i = 0
+        while i < len(music):
+            if music[i] == GRACE_START_TOKEN:
+                notes = []
+                i += 1
+                while i < len(music) and music[i] != GRACE_END_TOKEN:
+                    notes.append(music[i])
+                    i += 1
+                result.append("{" + "".join(notes) + "}")
+                i += 1  # skip GRACE_END_TOKEN
+            elif music[i] == CHORD_START_TOKEN:
+                notes = []
+                i += 1
+                while i < len(music) and music[i] != CHORD_END_TOKEN:
+                    notes.append(music[i])
+                    i += 1
+                result.append("[" + "".join(notes) + "]")
+                i += 1  # skip CHORD_END_TOKEN
+            else:
+                result.append(music[i])
+                i += 1
+        return " ".join(result)
 
 
 # ---------------------------------------------------------------------------
