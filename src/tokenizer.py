@@ -71,6 +71,13 @@ _TOKEN_RE = re.compile(r"""(?x)
 # Characters/sequences to treat as whitespace and discard
 _STRIP_RE = re.compile(r"[\r\n\t \\]+")
 
+# Validates chord symbols: root [A-G], optional accidental, optional quality, optional
+# extension digits, optional slash bass note.  Rejects free-text annotations and stray ABC.
+# Matches: "G"  "Am"  "D7"  "F#m7"  "Bb"  "Cmaj7"  "Gdim"  "Dsus4"  "G/B"  "Am7/G"
+_CHORD_SYMBOL_RE = re.compile(
+    r'^"[A-G][b#]?(?:maj|min|m|dim|aug|sus[24]?|add)?\d*(?:/[A-G][b#]?)?"$'
+)
+
 # Matches a single note at the start of a string (used to extract from inline chords)
 _FIRST_NOTE_RE = re.compile(
     r"(?:\^\^|\^|__|_|=)?[A-Ga-gzxZ][,']*(?:\d+\/\d+|\d+\/|\/\d+|\/+|\d+)?"
@@ -166,9 +173,10 @@ def tokenize_abc(abc: str) -> list[str]:
                 tokens.extend(inner)
                 tokens.append(GRACE_END_TOKEN)
             continue
-        # Chord symbols: keep as atomic token
+        # Chord symbols: keep only well-formed chord names, discard annotations/garbage
         if first == '"':
-            tokens.append(tok)
+            if _CHORD_SYMBOL_RE.match(tok):
+                tokens.append(tok)
             continue
         # Discard bang decorations and comments
         if first in ('!', '%'):
