@@ -1,4 +1,6 @@
-models/large/*.pt
-models/large/*.pkl
-models/large/latest.pt
-models/large/best.pt
+# Model checkpoints and tokenizer vocabs
+models/**/*.pt
+models/**/*.pkl
+
+# Raw dataset — not needed for inference
+data/tunes.json

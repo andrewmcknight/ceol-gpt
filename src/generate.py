@@ -101,6 +101,69 @@ def load_model(
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
+def generate_stream(
+    model: CeolGPT,
+    tokenizer: ABCTokenizer,
+    tune_type: str,
+    key: str,
+    meter: str,
+    max_new_tokens: int = 512,
+    temperature: float = 0.8,
+    top_k: int = 50,
+    top_p: float = 0.95,
+    device: str | torch.device = "cpu",
+):
+    """Autoregressively generate one tune, yielding one token string per step.
+
+    Yields each raw token string (e.g. ``"G2"``, ``"|"``) as it is sampled.
+    Control/conditioning tokens (``<BOS>``, ``<EOS>``, ``<TYPE:...>``, etc.)
+    are not yielded.  Generation stops at ``<EOS>`` or ``max_new_tokens``.
+    """
+    device = torch.device(device)
+    model = model.to(device)
+
+    prefix_ids = tokenizer.encode(
+        abc="",
+        tune_type=tune_type,
+        key=key,
+        meter=meter,
+        add_bos=True,
+        add_eos=False,
+    )
+    input_ids = torch.tensor([prefix_ids], dtype=torch.long, device=device)
+
+    eos_id = tokenizer.eos_id
+    id_to_token = tokenizer.vocab.id_to_token
+    max_ctx = model.cfg.max_seq_len
+
+    _skip_prefixes = ("<TYPE:", "<KEY:", "<METER:")
+    _skip_tokens = {tokenizer.vocab.token_to_id.get(t) for t in
+                    ("<PAD>", "<BOS>", "<EOS>", "<UNK>")} - {None}
+
+    for _ in range(max_new_tokens):
+        ctx = input_ids[:, -max_ctx:]
+        logits = model(ctx)
+        logits = logits[0, -1, :]
+
+        if temperature != 1.0:
+            logits = logits / temperature
+
+        logits = _top_k_top_p_filter(logits, top_k=top_k, top_p=top_p)
+
+        probs = F.softmax(logits, dim=-1)
+        next_id = torch.multinomial(probs, num_samples=1).unsqueeze(0)  # (1, 1)
+        input_ids = torch.cat([input_ids, next_id], dim=1)
+
+        token_id = next_id.item()
+        if token_id == eos_id:
+            break
+
+        token_str = id_to_token.get(token_id, "<UNK>")
+        if token_id not in _skip_tokens and not any(token_str.startswith(p) for p in _skip_prefixes):
+            yield token_str
+
+
+@torch.no_grad()
 def generate(
     model: CeolGPT,
     tokenizer: ABCTokenizer,
@@ -123,47 +186,18 @@ def generate(
         Space-separated ABC music body string (no headers), e.g.
         ``"|: G2 BG A2 GA | B4 A4 :|"``
     """
-    device = torch.device(device)
-    model = model.to(device)
-
-    # Build conditioning prefix and encode it
-    prefix_ids = tokenizer.encode(
-        abc="",
+    tokens = list(generate_stream(
+        model, tokenizer,
         tune_type=tune_type,
         key=key,
         meter=meter,
-        add_bos=True,
-        add_eos=False,
-    )
-    input_ids = torch.tensor([prefix_ids], dtype=torch.long, device=device)
-
-    eos_id = tokenizer.eos_id
-    max_ctx = model.cfg.max_seq_len
-
-    for _ in range(max_new_tokens):
-        # Truncate context to model's maximum sequence length
-        ctx = input_ids[:, -max_ctx:]
-
-        logits = model(ctx)          # (1, T, V)
-        logits = logits[0, -1, :]    # (V,) — next-token logits only
-
-        # Temperature scaling
-        if temperature != 1.0:
-            logits = logits / temperature
-
-        # Top-k / top-p filtering
-        logits = _top_k_top_p_filter(logits, top_k=top_k, top_p=top_p)
-
-        # Sample one token
-        probs = F.softmax(logits, dim=-1)
-        next_id = torch.multinomial(probs, num_samples=1).unsqueeze(0)  # (1, 1)
-
-        input_ids = torch.cat([input_ids, next_id], dim=1)
-
-        if next_id.item() == eos_id:
-            break
-
-    return tokenizer.decode_to_abc(input_ids[0].tolist())
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        device=device,
+    ))
+    return " ".join(tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +223,14 @@ def main():
     print(f"Vocab size: {len(tokenizer):,}  |  Device: {args.device}")
 
     print(f"\nGenerating {args.tune_type} in {args.key} ({args.meter}) ...\n")
-    abc_body = generate(
+    print(
+        f"X:1\n"
+        f"T:Generated {args.tune_type.title()}\n"
+        f"M:{args.meter}\n"
+        f"L:{'1/4' if args.meter == '3/2' else '1/8'}\n"
+        f"K:{args.key}"
+    )
+    for token in generate_stream(
         model, tokenizer,
         tune_type=args.tune_type,
         key=args.key,
@@ -199,17 +240,9 @@ def main():
         top_k=args.top_k,
         top_p=args.top_p,
         device=args.device,
-    )
-
-    full_abc = (
-        f"X:1\n"
-        f"T:Generated {args.tune_type.title()}\n"
-        f"M:{args.meter}\n"
-        f"L:{'1/4' if args.meter == '3/2' else '1/8'}\n"
-        f"K:{args.key}\n"
-        f"{abc_body}"
-    )
-    print(full_abc)
+    ):
+        print(token, end=" ", flush=True)
+    print()
 
 
 if __name__ == "__main__":

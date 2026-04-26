@@ -1,3 +1,12 @@
+---
+title: ceol-gpt
+emoji: 🎵
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+app_file: app.py
+---
+
 # ceol-gpt
 
 Ceol (pronounced "kyohl" or "ke-yole") is the Irish word for music. This project is a GPT-style autoregressive transformer trained from scratch on ABC notation Irish folk music that generates novel tunes conditioned on tune type and key signature.
