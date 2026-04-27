@@ -34,7 +34,7 @@ python -m src.generate --type reel --key Gmajor --temperature 0.8
 
 <!-- TODO: Add video links before submission -->
 - Demo video: [link](https://youtu.be/YzsUfMwSh00)
-- Technical walkthrough: [link]
+- Technical walkthrough: [link](https://youtu.be/hPQf4qZe_Ik)
 
 ## Evaluation
 
