@@ -50,7 +50,7 @@ _TOKEN_RE = re.compile(r"""(?x)
     # --- Single-character decorations (kept as own tokens) ---
   | [~.THuvJLMPS](?=[A-Ga-g\^_=])   # decoration immediately before a note
 
-    # --- Notes and rests ---
+    # --- Notes and rests ---  
     # Accidental + pitch + octave modifiers + duration
   | (?:\^\^|\^|__|_|=)?              # optional accidental
     [A-Ga-gzxZ]                      # pitch letter (z/x = rest, Z = full-bar rest)
